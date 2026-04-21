@@ -1,0 +1,80 @@
+# Load time series data
+
+Time series data records measurements or observations indexed by timestamps. It is widely used in IoT, sensor monitoring, financial analysis, and scientific research. These datasets typically contain a time column, tag columns (identifying the source/device), and field columns (the actual measurements).
+
+This guide shows you how to load time series data stored in [Apache TsFile](https://tsfile.apache.org/) format.
+
+## TsFile files
+
+[TsFile](https://tsfile.apache.org/) is a columnar file format designed specifically for time series data. It is the native storage format of [Apache IoTDB](https://iotdb.apache.org/) and supports efficient compression and querying of time series data.
+
+> [!TIP]
+> You need to install the `tsfile` Python package to load TsFile data: `pip install tsfile`
+
+### Basic usage
+
+Load a TsFile dataset by specifying the `tsfile` builder name:
+
+```py
+>>> from datasets import load_dataset
+>>> dataset = load_dataset("tsfile", data_files="sensor_data.tsfile")
+```
+
+Each row in the resulting dataset represents one timestamp for one device, with columns for time, tags (device identifiers), and fields (measurement values):
+
+```py
+>>> dataset["train"][0]
+{'time': 1000, 'region': 'asia', 'temperature': 25.0, 'humidity': 60.0}
+```
+
+### Multiple files
+
+To load more than one TsFile, pass them as a list or use a glob pattern:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files=["data_part1.tsfile", "data_part2.tsfile"])
+
+# or use a glob pattern
+>>> dataset = load_dataset("tsfile", data_files="data/*.tsfile")
+```
+
+You can also map specific files to train and test splits:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files={
+...     "train": "train/*.tsfile",
+...     "test": "test/*.tsfile",
+... })
+```
+
+### Select specific columns
+
+Use the `columns` parameter to load only specific field columns. Tag columns and the time column are always included:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files="data.tsfile", columns=["temperature"])
+```
+
+### Multiple tables
+
+A single TsFile can contain multiple tables, each with its own schema. When this is the case, use the `table_name` parameter to specify which table to load:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files="multi_table.tsfile", table_name="weather")
+```
+
+If the TsFile contains only one table, it will be selected automatically.
+
+### Custom features
+
+You can manually specify the output schema using the `features` parameter:
+
+```py
+>>> from datasets import Features, Value
+>>> features = Features({
+...     "time": Value("int64"),
+...     "region": Value("string"),
+...     "temperature": Value("float32"),
+... })
+>>> dataset = load_dataset("tsfile", data_files="data.tsfile", features=features)
+```
