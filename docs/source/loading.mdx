@@ -200,6 +200,33 @@ This will return the image caption and the image bytes in a single request.
 
 Note that the HDF5 loader assumes that the file has "tabular" structure, i.e. that all datasets in the file have (the same number of) rows on their first dimension.
 
+### TsFile
+
+[Apache TsFile](https://tsfile.apache.org/) is a columnar file format optimized for time series data, used by [Apache IoTDB](https://iotdb.apache.org/) and other time series systems. Each `.tsfile` is loaded as a single Arrow table whose first column is `timestamp` (`int64`) followed by one `float64` column per logical timeseries:
+
+```py
+>>> from datasets import load_dataset
+>>> dataset = load_dataset("tsfile", data_files="data/sample.tsfile", split="train")
+```
+
+You can select specific timeseries with `columns` and push down a time-range filter with `start_time` / `end_time`:
+
+```py
+>>> dataset = load_dataset(
+...     "tsfile",
+...     data_files="data/sample.tsfile",
+...     columns=["mytable.d1.temperature"],
+...     start_time=1_700_000_000_000,
+...     end_time=1_700_000_003_000,
+...     split="train",
+... )
+```
+
+The builder also supports device-level (`devices=`) and field-level (`fields=`) filters that prune timeseries at the metadata layer, so unselected devices or sensors are never decoded.
+
+> [!TIP]
+> For more details, check out the [how to load time series datasets](timeseries_load) guide.
+
 ### SQL
 
 Read database contents with [`~datasets.Dataset.from_sql`] by specifying the URI to connect to your database. You can read both table names and queries:
