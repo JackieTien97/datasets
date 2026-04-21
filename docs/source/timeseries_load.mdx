@@ -78,3 +78,7 @@ You can manually specify the output schema using the `features` parameter:
 ... })
 >>> dataset = load_dataset("tsfile", data_files="data.tsfile", features=features)
 ```
+
+> [!NOTE]
+> When using both `columns` and `features`, every column listed in `columns` must also
+> be present in `features`. Otherwise, a `ValueError` is raised.

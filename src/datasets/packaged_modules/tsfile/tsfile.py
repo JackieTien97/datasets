@@ -35,9 +35,6 @@ class TsFileConfig(datasets.BuilderConfig):
     table_name: Optional[str] = None
     batch_size: Optional[int] = None
 
-    def __post_init__(self):
-        super().__post_init__()
-
 
 def _resolve_table_name(df, config_table_name: Optional[str]) -> str:
     table_names = list(df._index.table_entries.keys())
@@ -67,12 +64,21 @@ def _tsfile_dtype_to_datasets_value(data_type) -> datasets.Value:
         TSDataType.FLOAT: "float32",
         TSDataType.DOUBLE: "float64",
         TSDataType.TIMESTAMP: "int64",
+        TSDataType.TEXT: "string",
+        TSDataType.STRING: "string",
+        TSDataType.DATE: "string",
+        TSDataType.BLOB: "binary",
     }
-    return datasets.Value(mapping.get(data_type, "float64"))
+    dtype_str = mapping.get(data_type)
+    if dtype_str is None:
+        logger.warning(f"Unknown TsFile data type '{data_type}', defaulting to float64")
+        dtype_str = "float64"
+    return datasets.Value(dtype_str)
 
 
 def _infer_features_from_tsfile(file_path: str, config_table_name: Optional[str], config_columns: Optional[list[str]]) -> tuple:
     from tsfile import TsFileDataFrame
+    from tsfile.constants import ColumnCategory
 
     df = TsFileDataFrame(file_path, show_progress=False)
     try:
@@ -82,8 +88,6 @@ def _infer_features_from_tsfile(file_path: str, config_table_name: Optional[str]
         feature_dict = {"time": datasets.Value("int64")}
         for tag_col in table_entry.tag_columns:
             feature_dict[tag_col] = datasets.Value("string")
-
-        from tsfile.constants import ColumnCategory
 
         reader = next(iter(df._readers.values()))
         table_schemas = reader._reader.get_all_table_schemas()

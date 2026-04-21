@@ -168,7 +168,7 @@ TESTS_REQUIRE = [
     "faiss-cpu>=1.8.0.post1",  # Pins numpy < 2
     "h5py",
     "pylance",
-    "tsfile>=2.2.1.dev4",
+    "tsfile>=2.3.0",
     "jax>=0.3.14; sys_platform != 'win32'",
     "jaxlib>=0.3.14; sys_platform != 'win32'",
     "lz4; python_version < '3.14'",  # python 3.14 gives ImportError: cannot import name '_compression' from partially initialized module 'lz4.frame
@@ -212,7 +212,7 @@ PDFS_REQUIRE = ["pdfplumber>=0.11.4"]
 
 NIBABEL_REQUIRE = ["nibabel>=5.3.2", "ipyniivue==2.4.2"]
 
-TSFILE_REQUIRE = ["tsfile>=2.2.1.dev4"]
+TSFILE_REQUIRE = ["tsfile>=2.3.0"]
 
 EXTRAS_REQUIRE = {
     "audio": AUDIO_REQUIRE,

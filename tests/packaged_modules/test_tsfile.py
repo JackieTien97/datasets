@@ -225,3 +225,95 @@ def test_tsfile_batch_size(tsfile_single_table):
     assert len(tables) >= 3
     for _, table in tables[:-1]:
         assert table.num_rows <= 2
+
+
+def test_tsfile_batch_size_exceeds_data_length(tsfile_single_table):
+    builder = TsFile(table_name="sensor", batch_size=1000)
+    generator = builder._generate_tables([tsfile_single_table])
+    tables = list(generator)
+    assert len(tables) == 1
+    _, table = tables[0]
+    assert table.num_rows == 5
+
+
+def test_tsfile_no_tag_columns(tmp_path):
+    schema = TableSchema(
+        "metrics",
+        [
+            ColumnSchema("temperature", TSDataType.DOUBLE, ColumnCategory.FIELD),
+            ColumnSchema("humidity", TSDataType.DOUBLE, ColumnCategory.FIELD),
+        ],
+    )
+    df = pd.DataFrame(
+        {
+            "time": [1000, 2000, 3000],
+            "temperature": [25.0, 26.0, 27.0],
+            "humidity": [60.0, 58.0, 55.0],
+        }
+    )
+    path = str(tmp_path / "no_tags.tsfile")
+    with TsFileTableWriter(path, schema) as writer:
+        writer.write_dataframe(df)
+
+    builder = TsFile(table_name="metrics")
+    generator = builder._generate_tables([path])
+    tables = [table for _, table in generator]
+    pa_table = pa.concat_tables(tables)
+
+    assert "time" in pa_table.column_names
+    assert "temperature" in pa_table.column_names
+    assert "humidity" in pa_table.column_names
+    assert pa_table.num_rows == 3
+    assert pa_table.column("temperature").to_pylist() == [25.0, 26.0, 27.0]
+
+
+def test_tsfile_mixed_field_types(tmp_path):
+    schema = TableSchema(
+        "device",
+        [
+            ColumnSchema("name", TSDataType.STRING, ColumnCategory.TAG),
+            ColumnSchema("status", TSDataType.STRING, ColumnCategory.FIELD),
+            ColumnSchema("label", TSDataType.TEXT, ColumnCategory.FIELD),
+            ColumnSchema("active", TSDataType.BOOLEAN, ColumnCategory.FIELD),
+            ColumnSchema("count", TSDataType.INT32, ColumnCategory.FIELD),
+            ColumnSchema("total", TSDataType.INT64, ColumnCategory.FIELD),
+            ColumnSchema("score", TSDataType.FLOAT, ColumnCategory.FIELD),
+        ],
+    )
+    df = pd.DataFrame(
+        {
+            "time": [1000, 2000],
+            "name": ["dev1", "dev1"],
+            "status": ["ok", "warn"],
+            "label": ["alpha", "beta"],
+            "active": [True, False],
+            "count": np.array([10, 20], dtype=np.int32),
+            "total": np.array([100, 200], dtype=np.int64),
+            "score": np.array([1.5, 2.5], dtype=np.float32),
+        }
+    )
+    path = str(tmp_path / "mixed_types.tsfile")
+    with TsFileTableWriter(path, schema) as writer:
+        writer.write_dataframe(df)
+
+    from datasets.packaged_modules.tsfile.tsfile import _infer_features_from_tsfile
+
+    features, table_name = _infer_features_from_tsfile(path, None, None)
+    assert table_name == "device"
+    assert features["status"] == Value("string")
+    assert features["label"] == Value("string")
+    assert features["active"] == Value("bool")
+    assert features["count"] == Value("int32")
+    assert features["total"] == Value("int64")
+    assert features["score"] == Value("float32")
+
+    builder = TsFile(table_name="device")
+    generator = builder._generate_tables([path])
+    tables = [table for _, table in generator]
+    pa_table = pa.concat_tables(tables)
+
+    assert pa_table.num_rows == 2
+    assert pa_table.column("status").to_pylist() == ["ok", "warn"]
+    assert pa_table.column("label").to_pylist() == ["alpha", "beta"]
+    assert pa_table.column("active").to_pylist() == [True, False]
+    assert pa_table.column("count").to_pylist() == [10, 20]
