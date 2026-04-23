@@ -12,7 +12,7 @@ from datasets.table import table_cast
 logger = datasets.utils.logging.get_logger(__name__)
 
 
-def _tsdatatype_to_arrow(ts_dtype) -> pa.DataType:
+def _tsdatatype_to_arrow(ts_dtype, *, timestamp_unit: str = "ms", timestamp_tz: Optional[str] = None) -> pa.DataType:
     """Map a tsfile ``TSDataType`` to its closest Arrow type."""
     from tsfile.constants import TSDataType
 
@@ -20,15 +20,67 @@ def _tsdatatype_to_arrow(ts_dtype) -> pa.DataType:
         TSDataType.BOOLEAN: pa.bool_(),
         TSDataType.INT32: pa.int32(),
         TSDataType.INT64: pa.int64(),
-        TSDataType.TIMESTAMP: pa.int64(),
+        TSDataType.TIMESTAMP: pa.timestamp(timestamp_unit, tz=timestamp_tz),
         TSDataType.FLOAT: pa.float32(),
         TSDataType.DOUBLE: pa.float64(),
         TSDataType.TEXT: pa.string(),
         TSDataType.STRING: pa.string(),
-        TSDataType.DATE: pa.string(),
+        TSDataType.DATE: pa.date32(),
         TSDataType.BLOB: pa.binary(),
     }
     return mapping.get(ts_dtype, pa.string())
+
+
+def _to_epoch_int(value: pa.TimestampScalar, unit: str) -> int:
+    """Convert a PyArrow timestamp scalar to an integer epoch in the given unit."""
+    return value.cast(pa.timestamp(unit)).value
+
+
+def _promote_tsdatatype(a, b):
+    """Return the wider of two ``TSDataType`` values.
+
+    IoTDB supports ``ALTER COLUMN ... SET DATA TYPE`` with the following
+    promotion paths (see ``TypeInferenceUtils.canAutoCast``):
+
+    - INT32 → INT64, FLOAT, DOUBLE
+    - INT64 → DOUBLE
+    - FLOAT → DOUBLE
+
+    Before compaction rewrites old TsFiles, the same column may legitimately
+    carry different types across files.  This helper picks the wider type so
+    that every file's data can be safely cast into the merged schema.
+    """
+    if a == b:
+        return a
+
+    from tsfile.constants import TSDataType
+
+    # Explicit promotion table: (a, b) → result.
+    # The graph is a DAG, NOT a linear chain:
+    #   INT32 → INT64 → DOUBLE
+    #   INT32 → FLOAT → DOUBLE
+    # INT64 and FLOAT are incompatible with each other; their common
+    # supertype is DOUBLE.
+    _PROMOTE = {
+        (TSDataType.INT32, TSDataType.INT64): TSDataType.INT64,
+        (TSDataType.INT32, TSDataType.FLOAT): TSDataType.FLOAT,
+        (TSDataType.INT32, TSDataType.DOUBLE): TSDataType.DOUBLE,
+        (TSDataType.INT64, TSDataType.FLOAT): TSDataType.DOUBLE,
+        (TSDataType.INT64, TSDataType.DOUBLE): TSDataType.DOUBLE,
+        (TSDataType.FLOAT, TSDataType.DOUBLE): TSDataType.DOUBLE,
+    }
+    pair = (a, b)
+    if pair in _PROMOTE:
+        return _PROMOTE[pair]
+    pair = (b, a)
+    if pair in _PROMOTE:
+        return _PROMOTE[pair]
+
+    # Non-numeric or unrelated types: cannot promote.
+    raise ValueError(
+        f"Incompatible column types across files: {a.name} vs {b.name}. "
+        f"Only numeric widening (INT32→INT64→DOUBLE, INT32→FLOAT→DOUBLE) is supported."
+    )
 
 
 @dataclass
@@ -43,12 +95,13 @@ class TsFileConfig(datasets.BuilderConfig):
             Subset of columns (tag and/or field names) to read from the table.
             When unset, all columns of the table are returned. Columns that are
             absent from a particular file are filled with nulls.
-        start_time (`int`, *optional*):
-            Inclusive lower bound for the timestamp range. Defaults to no lower
-            bound.
-        end_time (`int`, *optional*):
-            Inclusive upper bound for the timestamp range. Defaults to no upper
-            bound.
+        start_time (`pa.TimestampScalar`, *optional*):
+            Inclusive lower bound for the timestamp range, as a PyArrow
+            timestamp scalar (e.g. ``pa.scalar(value, type=pa.timestamp("ms"))``
+            ). Defaults to no lower bound.
+        end_time (`pa.TimestampScalar`, *optional*):
+            Inclusive upper bound for the timestamp range. Same type as
+            ``start_time``. Defaults to no upper bound.
         batch_size (`int`, *optional*, defaults to 100_000):
             Maximum number of rows per Arrow record batch. Larger values reduce
             per-batch overhead at the cost of more memory.
@@ -58,15 +111,25 @@ class TsFileConfig(datasets.BuilderConfig):
         on_bad_files (`Literal["error", "warn", "skip"]`, *optional*, defaults to "error"):
             How to react when a file cannot be opened or does not contain the
             requested table.
+        timestamp_unit (`str`, *optional*, defaults to "ms"):
+            Time unit used for the timestamp column. Must be one of
+            ``"s"``, ``"ms"``, ``"us"``, or ``"ns"``.  IoTDB defaults to
+            milliseconds; change this if the source database was configured
+            differently.
+        timestamp_tz (`str`, *optional*):
+            Time zone for the timestamp column (e.g. ``"UTC"``,
+            ``"Asia/Shanghai"``). When unset, the timestamp is timezone-naive.
     """
 
     table_name: Optional[str] = None
     columns: Optional[list[str]] = None
-    start_time: Optional[int] = None
-    end_time: Optional[int] = None
+    start_time: Optional[pa.TimestampScalar] = None
+    end_time: Optional[pa.TimestampScalar] = None
     batch_size: int = 100_000
     features: Optional[datasets.Features] = None
     on_bad_files: Literal["error", "warn", "skip"] = "error"
+    timestamp_unit: Literal["s", "ms", "us", "ns"] = "ms"
+    timestamp_tz: Optional[str] = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -74,6 +137,14 @@ class TsFileConfig(datasets.BuilderConfig):
             raise ValueError(f"`batch_size` must be a positive integer, got {self.batch_size}")
         if self.columns is not None and len(self.columns) == 0:
             raise ValueError("`columns` must be a non-empty list when provided.")
+        if self.timestamp_unit not in ("s", "ms", "us", "ns"):
+            raise ValueError(f"`timestamp_unit` must be one of 's', 'ms', 'us', 'ns', got {self.timestamp_unit!r}")
+        if self.on_bad_files not in ("error", "warn", "skip"):
+            raise ValueError(f"`on_bad_files` must be one of 'error', 'warn', 'skip', got {self.on_bad_files!r}")
+        if self.start_time is not None:
+            self.start_time = _to_epoch_int(self.start_time, self.timestamp_unit)
+        if self.end_time is not None:
+            self.end_time = _to_epoch_int(self.end_time, self.timestamp_unit)
 
 
 class TsFile(datasets.ArrowBasedBuilder):
@@ -87,6 +158,11 @@ class TsFile(datasets.ArrowBasedBuilder):
 
     BUILDER_CONFIG_CLASS = TsFileConfig
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._resolved_table_name: Optional[str] = None
+        self._requested_columns: Optional[list[str]] = None
+
     def _info(self):
         if (
             self.config.columns is not None
@@ -94,8 +170,8 @@ class TsFile(datasets.ArrowBasedBuilder):
             and set(self.config.columns) != set(self.config.features)
         ):
             raise ValueError(
-                "The columns and features argument must contain the same columns, but got ",
-                f"{self.config.columns} and {self.config.features}",
+                "The columns and features argument must contain the same columns, but got "
+                f"{self.config.columns} and {self.config.features}"
             )
         return datasets.DatasetInfo(features=self.config.features)
 
@@ -112,21 +188,27 @@ class TsFile(datasets.ArrowBasedBuilder):
         )
 
         splits = []
+        if self.info.features is None:
+            # TsFile columns can differ across files (IoTDB schema evolution),
+            # so we must scan files from ALL splits to build a complete union
+            # schema — unlike Parquet where every file carries the full column set.
+            all_files = [f for file_list in data_files.values() for f in file_list]
+            resolved_table, features = self._infer_features(all_files)
+            if features is None:
+                raise ValueError(
+                    "Could not infer schema from any of the provided files. "
+                    "Set `features` explicitly or check the input files."
+                )
+            self._resolved_table_name = resolved_table
+            self.info.features = features
+
+        if self._resolved_table_name is None:
+            # User pinned `features` but not `table_name`: still need a table to query.
+            all_files = [f for file_list in data_files.values() for f in file_list]
+            self._resolved_table_name = self._discover_first_table(all_files)
+
         for split_name, files in data_files.items():
             files = list(files)
-            if self.info.features is None:
-                resolved_table, features = self._infer_features(files)
-                if features is None:
-                    raise ValueError(
-                        "Could not infer schema from any of the provided files. "
-                        "Set `features` explicitly or check the input files."
-                    )
-                self._resolved_table_name = resolved_table
-                self.info.features = features
-            elif self._resolved_table_name is None:
-                # User pinned `features` but not `table_name`: still need a table to query.
-                self._resolved_table_name = self._discover_first_table(files)
-
             splits.append(datasets.SplitGenerator(name=split_name, gen_kwargs={"files": files}))
         return splits
 
@@ -148,33 +230,20 @@ class TsFile(datasets.ArrowBasedBuilder):
     def _infer_features(self, files):
         """Return ``(resolved_table_name, Features)`` from the input files.
 
-        Strategy:
-        - ``columns`` provided (with or without ``table_name``) -> no file
-          scanning needed for column collection.  Missing columns are filled
-          with nulls (``float64``) at read time.  If ``table_name`` is also
-          absent, a single file is opened only to discover the table name.
-        - ``columns`` not provided -> scan every file and union the table
-          columns so that schema-evolved files are supported.
+        All files are always scanned so that type promotion (e.g.
+        INT32→INT64→DOUBLE) across schema-evolved files is handled correctly.
+        Columns that are requested but never appear in any file fall back to
+        ``float64`` and are filled with nulls at read time.
         """
         from tsfile.constants import TIME_COLUMN, ColumnCategory
 
         wanted_table = self._resolved_table_name
         requested_columns = self._requested_columns
 
-        # User specified columns → no need to collect column schemas from files.
-        # Missing columns will be filled with nulls at read time.
-        if requested_columns is not None:
-            resolved_table = wanted_table
-            if resolved_table is None:
-                resolved_table = self._discover_first_table(files)
-            if resolved_table is None:
-                return None, None
-            return resolved_table, self._build_features(TIME_COLUMN, {}, requested_columns)
-
-        # User did not specify columns → full scan to union all columns.
         merged_columns: dict = {}  # name -> tsfile.ColumnSchema (lazy import)
         time_column_name: Optional[str] = None
         resolved_table: Optional[str] = wanted_table
+        wanted_set = set(requested_columns) if requested_columns is not None else None
 
         for file in files:
             try:
@@ -192,7 +261,15 @@ class TsFile(datasets.ArrowBasedBuilder):
                         if col.get_category() == ColumnCategory.TIME:
                             time_column_name = name
                             continue
-                        merged_columns.setdefault(name, col)
+                        if wanted_set is not None and name not in wanted_set:
+                            continue
+                        existing = merged_columns.get(name)
+                        if existing is None:
+                            merged_columns[name] = col
+                        else:
+                            wider = _promote_tsdatatype(existing.get_data_type(), col.get_data_type())
+                            if wider != existing.get_data_type():
+                                merged_columns[name] = col
             except Exception as e:
                 if self._should_reraise(file, e):
                     raise
@@ -202,7 +279,7 @@ class TsFile(datasets.ArrowBasedBuilder):
             return None, None
 
         time_field_name = time_column_name or TIME_COLUMN
-        return resolved_table, self._build_features(time_field_name, merged_columns, None)
+        return resolved_table, self._build_features(time_field_name, merged_columns, requested_columns)
 
     def _build_features(
         self,
@@ -213,12 +290,22 @@ class TsFile(datasets.ArrowBasedBuilder):
         """Assemble the Arrow schema and wrap it in ``Features``."""
         from tsfile.constants import ColumnCategory
 
-        fields: list[pa.Field] = [pa.field(time_field_name, pa.int64())]
+        ts_arrow_kwargs = {"timestamp_unit": self.config.timestamp_unit, "timestamp_tz": self.config.timestamp_tz}
+        fields: list[pa.Field] = [
+            pa.field(time_field_name, pa.timestamp(self.config.timestamp_unit, tz=self.config.timestamp_tz))
+        ]
 
         if requested_columns is not None:
-            # User specified columns — all default to float64.
+            # User specified columns — preserve user-requested order. Use the
+            # discovered tsfile column type when available; fall back to float64
+            # for columns absent from every input file (filled with nulls later).
             for name in requested_columns:
-                if name != time_field_name:
+                if name == time_field_name:
+                    continue
+                col = merged_columns.get(name)
+                if col is not None:
+                    fields.append(pa.field(name, _tsdatatype_to_arrow(col.get_data_type(), **ts_arrow_kwargs)))
+                else:
                     fields.append(pa.field(name, pa.float64()))
         else:
             # No columns specified — use merged schema.
@@ -226,7 +313,9 @@ class TsFile(datasets.ArrowBasedBuilder):
             tag_cols = [c for c in merged_columns.values() if c.get_category() == ColumnCategory.TAG]
             field_cols = [c for c in merged_columns.values() if c.get_category() == ColumnCategory.FIELD]
             for col in (*tag_cols, *field_cols):
-                fields.append(pa.field(col.get_column_name(), _tsdatatype_to_arrow(col.get_data_type())))
+                fields.append(
+                    pa.field(col.get_column_name(), _tsdatatype_to_arrow(col.get_data_type(), **ts_arrow_kwargs))
+                )
 
         # Drop duplicate-named fields just in case (e.g. user listed the time column).
         seen: set[str] = set()
@@ -267,7 +356,7 @@ class TsFile(datasets.ArrowBasedBuilder):
         target_names = list(target_schema.names)
         if self._requested_columns is not None:
             requested_present = [c for c in self._requested_columns if c in available]
-            columns_to_read = requested_present or None
+            columns_to_read = requested_present
         else:
             columns_to_read = None
 
@@ -321,7 +410,14 @@ class TsFile(datasets.ArrowBasedBuilder):
 
         Missing columns are filled with typed nulls; extra columns are dropped.
         """
-        df = df.rename(columns=str.lower)
+        lowered = {col: col.lower() for col in df.columns}
+        if len(set(lowered.values())) < len(lowered):
+            dupes = [c for c in lowered.values() if list(lowered.values()).count(c) > 1]
+            raise ValueError(
+                f"Column name conflict after case-folding: {sorted(set(dupes))}. "
+                "DataFrame contains columns that differ only by case."
+            )
+        df = df.rename(columns=lowered)
         n_rows = len(df)
         arrays: list[pa.Array] = []
         for field in target_schema:
@@ -338,6 +434,18 @@ class TsFile(datasets.ArrowBasedBuilder):
     def _open_reader(file: str):
         from tsfile import TsFileReader
 
+        # Guard against corrupt files: the C library's TsFileReader constructor
+        # silently returns an invalid handle (instead of raising) when the file
+        # is not a valid TsFile, and any subsequent call on it segfaults.
+        # Pre-check the 6-byte magic header to avoid the crash.
+        _TSFILE_MAGIC = b"TsFile"
+        try:
+            with open(file, "rb") as f:
+                header = f.read(len(_TSFILE_MAGIC))
+        except OSError as e:
+            raise ValueError(f"Cannot open file {file!r}: {e}") from e
+        if header != _TSFILE_MAGIC:
+            raise ValueError(f"File {file!r} is not a valid TsFile (bad magic header).")
         return TsFileReader(file)
 
     @staticmethod
