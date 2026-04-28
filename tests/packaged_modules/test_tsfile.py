@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Sequence
 
 import pyarrow as pa
@@ -319,10 +319,16 @@ def test_to_epoch_naive_datetime():
     assert _to_epoch(datetime(1970, 1, 1, 0, 0, 1), "ms") == 1000
 
 
-def test_to_epoch_aware_datetime_normalized_to_utc():
+@pytest.mark.parametrize(
+    "aware",
+    [
+        datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone(timedelta(hours=8))),
+        "2024-01-01T00:00:00+08:00",
+    ],
+    ids=["datetime", "iso_string"],
+)
+def test_to_epoch_aware_inputs_normalized_to_utc(aware):
     # 2024-01-01T00:00:00 in UTC+8 == 2023-12-31T16:00:00 UTC.
-    tz_p8 = timezone(__import__("datetime").timedelta(hours=8))
-    aware = datetime(2024, 1, 1, 0, 0, 0, tzinfo=tz_p8)
     naive_utc = datetime(2023, 12, 31, 16, 0, 0)
     assert _to_epoch(aware, "ms") == _to_epoch(naive_utc, "ms")
 

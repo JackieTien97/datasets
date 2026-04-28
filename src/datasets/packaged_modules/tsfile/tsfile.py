@@ -289,8 +289,6 @@ class TsFile(datasets.ArrowBasedBuilder):
         ]
 
     def _generate_shards(self, files):
-        # One shard per split: per-device folding requires holding a split's
-        # devices in memory simultaneously, so further sharding is not free.
         yield from files
 
     def _generate_tables(self, files):
@@ -319,7 +317,7 @@ class TsFile(datasets.ArrowBasedBuilder):
         for file in files:
             try:
                 with self._open_reader(file) as reader:
-                    schemas = reader.get_all_table_schemas()
+                    schemas = self._schemas_by_lc(reader)
                     self._require_table_model(file, schemas)
                     if table is None:
                         table = next(iter(schemas))
@@ -437,7 +435,9 @@ class TsFile(datasets.ArrowBasedBuilder):
         device_to_files: dict[tuple, list[str]] = {}
         device_order: list[tuple] = []
         file_meta: dict[str, dict] = {}
-        table_lc = self._table.lower()
+        # ``self._table`` was lowercased either by user-input normalization in
+        # ``_split_generators`` or by ``_schemas_by_lc`` during auto-detect.
+        table_lc = self._table
 
         files_iter = tqdm(
             readers.items(),
@@ -448,11 +448,11 @@ class TsFile(datasets.ArrowBasedBuilder):
 
         for file, reader in files_iter:
             try:
-                schemas = reader.get_all_table_schemas()
+                schemas = self._schemas_by_lc(reader)
                 self._require_table_model(file, schemas)
-                if self._table not in schemas:
-                    raise _MissingTableError(self._table, list(schemas))
-                schema = schemas[self._table]
+                if table_lc not in schemas:
+                    raise _MissingTableError(table_lc, list(schemas))
+                schema = schemas[table_lc]
 
                 file_tag_cols: list[str] = []
                 file_field_cols: set[str] = set()
@@ -752,6 +752,17 @@ class TsFile(datasets.ArrowBasedBuilder):
                 f"File {file!r} is a tree-model TsFile, which is not supported. "
                 "Only table-model TsFiles can be loaded."
             )
+
+    @staticmethod
+    def _schemas_by_lc(reader) -> dict:
+        """Return ``get_all_table_schemas()`` keyed by lowercased table name.
+
+        TsFile / IoTDB treat table names case-insensitively, but the Python
+        binding's ``get_all_table_schemas()`` returns a dict keyed by whatever
+        casing the file was written with. Lowercasing the keys here lets all
+        downstream lookups use a single canonical form.
+        """
+        return {name.lower(): schema for name, schema in reader.get_all_table_schemas().items()}
 
     def _should_reraise(self, file: str, exc: BaseException) -> bool:
         """Apply ``on_bad_files`` policy. Returns True iff the caller should re-raise."""
