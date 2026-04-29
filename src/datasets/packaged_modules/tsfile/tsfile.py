@@ -264,9 +264,7 @@ class TsFile(datasets.ArrowBasedBuilder):
 
         # Lowercase user-facing names to match tsfile's case-insensitive convention.
         self._table = self.config.table_name.lower() if self.config.table_name else None
-        self._requested_fields = (
-            [c.lower() for c in self.config.columns] if self.config.columns else None
-        )
+        self._requested_fields = [c.lower() for c in self.config.columns] if self.config.columns else None
 
         all_files = [f for files in data_files.values() for f in files]
         scan = self._scan_metadata(all_files)
@@ -511,9 +509,7 @@ class TsFile(datasets.ArrowBasedBuilder):
                 if file not in file_meta:
                     continue
                 try:
-                    ts_arr, vals = self._read_device_from_file(
-                        readers[file], file_meta[file], device_key
-                    )
+                    ts_arr, vals = self._read_device_from_file(readers[file], file_meta[file], device_key)
                 except Exception as e:
                     if self._should_reraise(file, e):
                         raise
@@ -608,10 +604,7 @@ class TsFile(datasets.ArrowBasedBuilder):
         if not ts_parts:
             return np.array([], dtype=np.int64), {}
         ts_full = np.concatenate(ts_parts) if len(ts_parts) > 1 else ts_parts[0]
-        vals_full = {
-            f: (np.concatenate(parts) if len(parts) > 1 else parts[0])
-            for f, parts in field_parts.items()
-        }
+        vals_full = {f: (np.concatenate(parts) if len(parts) > 1 else parts[0]) for f, parts in field_parts.items()}
 
         # Defensive boundary mask: native query paths may emit rows just
         # outside the requested window in some chunk-boundary cases.

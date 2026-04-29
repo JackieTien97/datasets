@@ -87,10 +87,7 @@ def _write_single_device(path: str) -> None:
         ("temperature", TSDataType.DOUBLE, ColumnCategory.FIELD),
         ("humidity", TSDataType.DOUBLE, ColumnCategory.FIELD),
     ]
-    rows = [
-        {"time": T0 + i * 1000, "device": "d1", "temperature": 20.0 + i, "humidity": 50.0 + i}
-        for i in range(5)
-    ]
+    rows = [{"time": T0 + i * 1000, "device": "d1", "temperature": 20.0 + i, "humidity": 50.0 + i} for i in range(5)]
     _write_tsfile(path, [("mytable", cols, [rows])])
 
 
@@ -103,10 +100,7 @@ def _write_multi_device(path: str) -> None:
         ("humidity", TSDataType.DOUBLE, ColumnCategory.FIELD),
     ]
     tablets = [
-        [
-            {"time": T0 + i * 1000, "device": dev, "temperature": 10.0 + i, "humidity": 50.0 + i}
-            for i in range(3)
-        ]
+        [{"time": T0 + i * 1000, "device": dev, "temperature": 10.0 + i, "humidity": 50.0 + i} for i in range(3)]
         for dev in ("d1", "d2", "d3")
     ]
     _write_tsfile(path, [("plant", cols, tablets)])
@@ -216,10 +210,7 @@ def _write_two_devices_subset(path: str, devices: Sequence[str], base_ts: int) -
         ("device", TSDataType.STRING, ColumnCategory.TAG),
         ("v", TSDataType.DOUBLE, ColumnCategory.FIELD),
     ]
-    tablets = [
-        [{"time": base_ts + i * 1000, "device": dev, "v": float(i)} for i in range(3)]
-        for dev in devices
-    ]
+    tablets = [[{"time": base_ts + i * 1000, "device": dev, "v": float(i)} for i in range(3)] for dev in devices]
     _write_tsfile(path, [("mytable", cols, tablets)])
 
 
@@ -557,9 +548,18 @@ def test_load_all_supported_types(all_types_tsfile_path):
 
     assert len(ds) == 1
     assert ds.column_names == [
-        "tag", "time",
-        "col_boolean", "col_int32", "col_int64", "col_float", "col_double",
-        "col_text", "col_string", "col_timestamp", "col_date", "col_blob",
+        "tag",
+        "time",
+        "col_boolean",
+        "col_int32",
+        "col_int64",
+        "col_float",
+        "col_double",
+        "col_text",
+        "col_string",
+        "col_timestamp",
+        "col_date",
+        "col_blob",
     ]
     row = ds[0]
     assert row["tag"] == "d1"
