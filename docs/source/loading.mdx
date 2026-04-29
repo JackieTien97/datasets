@@ -68,7 +68,7 @@ The `split` parameter can also map a data file to a specific split:
 
 ## Local and remote files
 
-Datasets can be loaded from local files stored on your computer and from remote files. The datasets are most likely stored as a `csv`, `json`, `txt` or `parquet` file. The [`load_dataset`] function can load each of these file types.
+Datasets can be loaded from local files stored on your computer and from remote files. The datasets are most likely stored as a `csv`, `json`, `txt`, `parquet` or `tsfile` file. The [`load_dataset`] function can load each of these file types.
 
 ### CSV
 
@@ -199,6 +199,26 @@ This will return the image caption and the image bytes in a single request.
 ```
 
 Note that the HDF5 loader assumes that the file has "tabular" structure, i.e. that all datasets in the file have (the same number of) rows on their first dimension.
+
+### TsFile
+
+[Apache TsFile](https://tsfile.apache.org/) is a columnar file format designed specifically for time-series data. It natively supports timestamps, device tags, and measurement fields, enabling efficient time-range queries.
+
+To load a TsFile:
+
+```py
+>>> from datasets import load_dataset
+>>> dataset = load_dataset("tsfile", data_files="my_data.tsfile")
+```
+
+You can filter by time range, which is pushed down to TsFile's internal time index:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files="my_data.tsfile", start_time=1700000000000, end_time=1700086400000)
+```
+
+> [!TIP]
+> For more details, check out the [how to load tabular datasets from TsFile files](tabular_load#tsfile-files) guide.
 
 ### SQL
 

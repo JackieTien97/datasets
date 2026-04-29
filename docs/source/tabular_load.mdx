@@ -5,6 +5,7 @@ A tabular dataset is a generic dataset used to describe any data stored in rows 
 - CSV files
 - Pandas DataFrames
 - HDF5 files
+- TsFile files
 - Databases
 
 ## CSV files
@@ -74,6 +75,59 @@ If the dataset doesn't look as expected, you should explicitly [specify your dat
 ```
 
 Note that the HDF5 loader assumes that the file has "tabular" structure, i.e. that all datasets in the file have (the same number of) rows on their first dimension.
+
+## TsFile files
+
+[Apache TsFile](https://tsfile.apache.org/) is a columnar file format designed specifically for time-series data, used by [Apache IoTDB](https://iotdb.apache.org/). Unlike general-purpose formats such as CSV or Parquet, TsFile natively understands time-series concepts like timestamps, devices (TAG columns), and measurements (FIELD columns), enabling efficient time-range queries without scanning entire files.
+
+Load a TsFile:
+
+```py
+>>> from datasets import load_dataset
+>>> dataset = load_dataset("tsfile", data_files="my_data.tsfile")
+```
+
+Load multiple TsFile files with train/test splits:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files={"train": "train_data.tsfile", "test": "test_data.tsfile"})
+```
+
+**Select a specific table** when a file contains multiple tables:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files="my_data.tsfile", table_name="sensor_data")
+```
+
+**Select a subset of columns** (TAG and/or FIELD columns). Columns absent from a particular file are automatically filled with nulls:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files="my_data.tsfile", columns=["temperature", "humidity"])
+```
+
+**Filter by time range** — this is pushed down to TsFile's internal time index, so only the relevant data blocks are read from disk:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files="my_data.tsfile", start_time=1700000000000, end_time=1700086400000)
+```
+
+**Handle schema evolution** across multiple files. When different files have different columns (e.g. a new sensor field was added later), TsFile automatically unions all columns and fills missing values with nulls:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files=["day1.tsfile", "day2.tsfile"])
+```
+
+**Skip bad files** instead of failing the entire load:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files="data/*.tsfile", on_bad_files="skip")
+```
+
+**Control memory usage** with `batch_size` (number of rows per batch, default 100,000):
+
+```py
+>>> dataset = load_dataset("tsfile", data_files="large_data.tsfile", batch_size=50_000)
+```
 
 ## Databases
 
