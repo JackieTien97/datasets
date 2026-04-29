@@ -64,7 +64,7 @@ A TsFile can contain multiple tables. When `table_name` is omitted, the first ta
 
 ## Selecting columns
 
-`columns` restricts the FIELD columns that are read. TAG columns are always returned because they identify the device. Names that refer to TAGs or to fields absent from every file are tolerated: TAGs are emitted as usual, never-seen fields become all-null list columns.
+`columns` restricts the FIELD columns that are read. The TAG columns and the `time` column are always returned because they identify the device and its timeline. Names in `columns` that refer to a TAG or to the `time` column are silently ignored (they are emitted as usual, just once); names that match a field absent from every file become all-null list columns.
 
 ```py
 >>> dataset = load_dataset(

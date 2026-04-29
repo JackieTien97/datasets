@@ -148,11 +148,12 @@ class TsFileConfig(datasets.BuilderConfig):
             Name of the table to read. When unset, the first table found in
             the first valid file is used. Lookups are case-insensitive.
         columns (`list[str]`, *optional*):
-            Subset of FIELD columns to keep. TAG columns are *always* returned
-            (they identify the device and cannot be excluded). Names that
-            refer to TAG columns or to fields absent from every file resolve
-            quietly: TAGs are emitted as usual, and never-seen fields become
-            all-null list columns. When unset, all FIELDs are returned.
+            Subset of FIELD columns to keep. TAG columns and the TIME column
+            are *always* returned (they identify the device / its timeline
+            and cannot be excluded). Names that refer to TAG or TIME columns,
+            or to fields absent from every file, resolve quietly: TAGs/TIME
+            are emitted as usual, and never-seen fields become all-null list
+            columns. When unset, all FIELDs are returned.
         start_time, end_time (`datetime`, `date`, `pa.TimestampScalar`, ISO-8601 `str`, or `int`, *optional*):
             Inclusive timestamp range. Either bound may be omitted.
             ``datetime`` values are taken in their own tz (UTC if naive);
@@ -349,11 +350,13 @@ class TsFile(datasets.ArrowBasedBuilder):
 
         if self._requested_fields is not None:
             # Honor user order; silently drop names that turned out to be TAGs
-            # (TAGs are emitted as their own scalar columns and must not also
-            # appear as list-typed fields).
+            # or the TIME column (TAGs are emitted as their own scalar columns
+            # and TIME is always emitted as a list column — neither may also
+            # appear as a list-typed field, which would collide on schema name).
+            reserved = tag_seen | {time_col} if time_col is not None else tag_seen
             field_inner: dict[str, pa.DataType] = {}
             for name in self._requested_fields:
-                if name in tag_seen:
+                if name in reserved:
                     continue
                 ts_dtype = field_widest.get(name)
                 if ts_dtype is not None:

@@ -389,6 +389,34 @@ def test_columns_request_tag_is_silently_ignored(tsfile_path):
     assert ds[0]["temperature"] == [20.0, 21.0, 22.0, 23.0, 24.0]
 
 
+def test_columns_request_time_is_silently_ignored(tsfile_path):
+    """Passing the TIME column name in `columns` is a no-op (TIME is always emitted)."""
+    ds = load_dataset("tsfile", data_files=tsfile_path, columns=["time", "temperature"])["train"]
+
+    # `time` should appear exactly once, and as the real timestamp list — not
+    # as a duplicate all-null float64 list column.
+    assert ds.column_names == ["device", "time", "temperature"]
+    assert ds.features["time"].feature.dtype.startswith("timestamp")
+    row = ds[0]
+    assert len(row["time"]) == 5
+    assert row["time"][0] == datetime(2023, 11, 14, 22, 13, 20)
+    assert row["time"][-1] == datetime(2023, 11, 14, 22, 13, 24)
+    assert row["temperature"] == [20.0, 21.0, 22.0, 23.0, 24.0]
+
+
+def test_columns_request_only_time(tsfile_path):
+    """`columns=["time"]` should still produce TAG + TIME, with no FIELD list columns."""
+    ds = load_dataset("tsfile", data_files=tsfile_path, columns=["time"])["train"]
+
+    assert ds.column_names == ["device", "time"]
+    assert ds.features["time"].feature.dtype.startswith("timestamp")
+    row = ds[0]
+    assert row["device"] == "d1"
+    assert len(row["time"]) == 5
+    assert row["time"][0] == datetime(2023, 11, 14, 22, 13, 20)
+    assert row["time"][-1] == datetime(2023, 11, 14, 22, 13, 24)
+
+
 def test_columns_unknown_field_filled_with_null(tsfile_path):
     ds = load_dataset(
         "tsfile",
