@@ -102,6 +102,10 @@
       title: Load tabular data
     title: "Tabular"
   - sections:
+    - local: timeseries_load
+      title: Load time series data
+    title: "Time Series"
+  - sections:
     - local: share
       title: Share
     - local: dataset_card

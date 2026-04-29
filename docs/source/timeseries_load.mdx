@@ -1,0 +1,218 @@
+# Load time series data
+
+Time series data are sequences of values indexed by timestamps, commonly produced by sensors, IoT devices, monitoring systems, financial markets and scientific experiments. Unlike generic tabular data, time series data come with several domain-specific concerns:
+
+- a dedicated **timestamp axis** that aligns observations across many sensors / channels;
+- the need to **filter or slice by a time range** efficiently, often on files containing millions of rows;
+- the need to **address individual devices and individual measurements** as first-class concepts, not as ad-hoc string columns;
+- compact **time-series-specific encodings** (delta-of-delta on timestamps, GORILLA on slowly-varying floats) that dramatically beat generic columnar formats on storage size.
+
+Generic columnar formats such as CSV, JSON, Parquet and HDF5 can technically *store* time series, but they treat *time* as just another column. They are documented under the [tabular](tabular_load) guide and remain perfectly valid options for small or simple datasets. For larger or production time-series workloads, 🤗 Datasets ships a dedicated builder for the [Apache TsFile](https://tsfile.apache.org/) format (`.tsfile`), the columnar storage format used by [Apache IoTDB](https://iotdb.apache.org/) and other time series systems.
+
+## Apache TsFile
+
+A TsFile organizes data around the triple **(table, device, field)**:
+
+- a *table* groups devices that share the same schema (think of it as a "plant", a "fleet" or a "metric family");
+- a *device* (identified by one or more *tag* columns) is one physical or logical source of measurements;
+- a *field* is one numeric measurement channel on a device (a.k.a. *sensor* or *measurement*: `temperature`, `voltage`, `latency_ms`, ...).
+
+Every value lives at a specific `(device, field, timestamp)` coordinate. Both the on-disk layout (chunk-level time indices, per-device chunk groups) and the reader API are built around this structure, so range queries and device pruning don't require scanning the whole file.
+
+🤗 Datasets reads TsFile shards through the high-level `tsfile.TsFileDataFrame` API. Each `.tsfile` is opened lazily and converted to a single Arrow table whose first column is `timestamp` (`int64`, in the unit chosen by the writer — typically milliseconds since the Unix epoch, but the builder does not interpret it) followed by one `float64` column per selected timeseries.
+
+> [!WARNING]
+> The `TsFileDataFrame` API only supports the **table-model** TsFile. Files written purely with the tree model (`TsFileWriter.register_device` without any `register_table`) cannot be loaded yet, and only **numeric** field types (`BOOLEAN`, `INT32`, `INT64`, `FLOAT`, `DOUBLE`, `TIMESTAMP`) are exposed — they are unified to `float64` regardless of their original `TSDataType`. Non-numeric fields (`TEXT`, `STRING`, `BLOB`, `DATE`) are silently skipped during metadata discovery.
+
+### Installation
+
+The TsFile builder requires the `tsfile` Python package, which provides the `TsFileDataFrame` API:
+
+```bash
+pip install tsfile
+```
+
+### Basic usage
+
+Load a single TsFile by passing the `tsfile` builder name to [`~datasets.load_dataset`] and pointing `data_files` at one or several files:
+
+```py
+>>> from datasets import load_dataset
+>>> dataset = load_dataset("tsfile", data_files="data/sample.tsfile", split="train")
+>>> dataset
+Dataset({
+    features: ['timestamp', 'mytable.d1.temperature', 'mytable.d1.humidity'],
+    num_rows: 5
+})
+```
+
+Files can also be discovered directly by their extension:
+
+```py
+>>> dataset = load_dataset("data/*.tsfile", split="train")
+```
+
+To build train/test splits from separate files or directories, pass a dictionary:
+
+```py
+>>> dataset = load_dataset(
+...     "tsfile",
+...     data_files={"train": "data/train/*.tsfile", "test": "data/test/*.tsfile"},
+... )
+```
+
+### Series paths
+
+Each logical timeseries is exposed as a single Arrow column. Its name is built by joining the table name, the tag values that identify the device, and the field name with `.`:
+
+```
+<table> . <tag_value_1> ... <tag_value_n> . <field>
+```
+
+For a `mytable` with one tag column `device` and field `temperature`, the rows where `device = "d1"` are exposed as the series `mytable.d1.temperature`. The dot-separated form looks hierarchical but is purely a flattening of the table-model `(table, tag_tuple, field)` triple.
+
+You can list the available series for a given file with the underlying API:
+
+```py
+>>> from tsfile import TsFileDataFrame
+>>> df = TsFileDataFrame("data/sample.tsfile", show_progress=False)
+>>> df.list_timeseries()
+['mytable.d1.temperature', 'mytable.d1.humidity']
+>>> df.close()
+```
+
+### Selecting series
+
+The TsFile builder offers four complementary ways to narrow what is loaded. All filters are pushed down to the reader's metadata layer, so unselected devices/fields are never decoded.
+
+**By explicit path** — when you already know the exact series you want:
+
+```py
+>>> dataset = load_dataset(
+...     "tsfile",
+...     data_files="data/sample.tsfile",
+...     columns=["mytable.d1.temperature"],
+...     split="train",
+... )
+>>> dataset.column_names
+['timestamp', 'mytable.d1.temperature']
+```
+
+**By device** (`devices=`) — keep only listed device(s), across all their fields. Useful for "give me everything from these machines":
+
+```py
+>>> dataset = load_dataset(
+...     "tsfile",
+...     data_files="data/plant_2024.tsfile",
+...     devices=["d1", "d7"],
+...     split="train",
+... )
+>>> dataset.column_names
+['timestamp', 'plant.d1.temperature', 'plant.d1.humidity',
+ 'plant.d7.temperature', 'plant.d7.humidity']
+```
+
+The match is exact and segment-based: `devices=["d1"]` keeps `plant.d1.temperature` but never matches `plant.d10.temperature`.
+
+**By field** (`fields=`) — keep only specific measurements, across all devices. Useful for "give me the same sensor over the whole fleet":
+
+```py
+>>> dataset = load_dataset(
+...     "tsfile",
+...     data_files="data/plant_2024.tsfile",
+...     fields=["temperature"],
+...     split="train",
+... )
+>>> dataset.column_names
+['timestamp', 'plant.d1.temperature', 'plant.d2.temperature', 'plant.d3.temperature']
+```
+
+`devices=` and `fields=` combine as a logical AND — providing both gives you a 2-D projection of the schema:
+
+```py
+>>> dataset = load_dataset(
+...     "tsfile",
+...     data_files="data/plant_2024.tsfile",
+...     devices=["d2", "d3"],
+...     fields=["humidity"],
+...     split="train",
+... )
+>>> dataset.column_names
+['timestamp', 'plant.d2.humidity', 'plant.d3.humidity']
+```
+
+**By prefix** (`path_prefix=`) — delegates straight to `TsFileDataFrame.list_timeseries(path_prefix=...)` for the cheapest possible pruning when you can express your selection as a string prefix:
+
+```py
+>>> dataset = load_dataset("tsfile", data_files="...", path_prefix="plant.d1", split="train")
+```
+
+The `timestamp` column is always present and does not need to be listed in `columns`. An explicit `columns=` cannot be combined with `devices=` / `fields=` / `path_prefix=`.
+
+### Filtering by time range
+
+For long-running sensor logs, loading the whole file just to slice a window in memory is wasteful. The TsFile builder pushes time-range filters down to the underlying reader (via chunk-level time indices) using `start_time` and `end_time` (both inclusive, in the same unit as the file's timestamps):
+
+```py
+>>> dataset = load_dataset(
+...     "tsfile",
+...     data_files="data/sample.tsfile",
+...     start_time=1_700_000_000_000,
+...     end_time=1_700_000_003_000,
+...     split="train",
+... )
+```
+
+Either bound is optional. Omitting `start_time` means "from the beginning of the file"; omitting `end_time` means "until the end".
+
+Time and series filters compose naturally — for example, "the temperature of d1 and d7 during Q1":
+
+```py
+>>> dataset = load_dataset(
+...     "tsfile",
+...     data_files="data/plant_2024.tsfile",
+...     devices=["d1", "d7"],
+...     fields=["temperature"],
+...     start_time=Q1_START_MS,
+...     end_time=Q1_END_MS,
+...     split="train",
+... )
+```
+
+### Handling bad files
+
+When loading a glob of TsFile shards in production pipelines, occasionally one file may be corrupted. The `on_bad_files` argument controls the policy:
+
+- `"error"` (default): raise an exception on the first bad file.
+- `"warn"`: emit a warning and skip the file.
+- `"skip"`: silently skip the file.
+
+```py
+>>> dataset = load_dataset(
+...     "tsfile",
+...     data_files="data/*.tsfile",
+...     on_bad_files="warn",
+...     split="train",
+... )
+```
+
+### Schema and feature casting
+
+By default the schema is inferred from the first valid file: a `timestamp: int64` column followed by one `float64` column per selected timeseries. You can override this by passing your own [`~datasets.Features`]:
+
+```py
+>>> from datasets import Features, Value, load_dataset
+>>> features = Features({
+...     "timestamp": Value("int64"),
+...     "mytable.d1.temperature": Value("float32"),
+... })
+>>> dataset = load_dataset(
+...     "tsfile",
+...     data_files="data/sample.tsfile",
+...     columns=["mytable.d1.temperature"],
+...     features=features,
+...     split="train",
+... )
+```
+
+When both `columns` and `features` are provided, they must reference the same set of series (`features` must contain exactly `columns + ["timestamp"]`).
